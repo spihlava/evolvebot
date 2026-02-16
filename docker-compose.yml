@@ -1,0 +1,61 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: evolvebot-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    healthcheck:
+      test: [ "CMD", "ollama", "list" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - evolvebot-net
+
+  evolvebot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: evolvebot-app
+    volumes:
+      - ./skills:/app/skills
+      - ./sandbox:/app/sandbox
+    environment:
+      - EVOLVE_PROVIDER=minimax
+      - EXECUTOR_MODEL=MiniMax-M2.5
+      - MINIMAX_MODEL=MiniMax-M2.5
+      - MINIMAX_API_BASE=https://api.minimax.io/anthropic
+      - MINIMAX_API_KEY=${MINIMAX_API_KEY}
+      - GEMINI_MODEL=gemini-2.5-flash
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OPENAI_BASE_URL=http://ollama:11434/v1
+      - OPENAI_API_KEY=ollama
+      - EXEC_MODE=direct
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - evolvebot-net
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+volumes:
+  ollama_data:
+
+
+networks:
+  evolvebot-net:
+    driver: bridge

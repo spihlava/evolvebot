@@ -1,0 +1,6 @@
+google-genai
+openai
+python-dotenv
+rich
+pyyaml
+anthropic

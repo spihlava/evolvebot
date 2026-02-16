@@ -1,0 +1,13 @@
+name: shell
+description: "Run shell commands, read/write files, and execute Python scripts in the sandbox."
+triggers:
+  - run command
+  - execute
+  - fetch
+  - curl
+  - write file
+  - read file
+  - list files
+  - run script
+version: "1.0"
+builtin: true

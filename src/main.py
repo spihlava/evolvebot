@@ -18,6 +18,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import yaml
 from dotenv import load_dotenv
 from rich.console import Console
@@ -25,7 +27,8 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.status import Status
-from tools import EntityMatchGrader, LengthGrader
+from src.tools import EntityMatchGrader, LengthGrader
+from src.tui.dashboard import create_dashboard
 
 load_dotenv()
 
@@ -35,7 +38,7 @@ console = Console()
 # CONFIGURATION
 # ============================================================================
 
-PROJECT_ROOT = Path(__file__).resolve(strict=False).parent.parent
+PROJECT_ROOT = Path(__file__).absolute().parent.parent
 SKILLS_DIR = PROJECT_ROOT / "skills"
 SANDBOX_DIR = PROJECT_ROOT / "sandbox"
 SKILLS_DIR.mkdir(exist_ok=True)
@@ -86,8 +89,8 @@ class Brain:
         model = model or self.model
         try:
             if stream:
-                return self._stream_handler(model, messages, temperature)
-            
+                return self._stream_generator(model, messages, temperature)
+
             if self.provider == "gemini":
                 return self._gemini_chat(model, messages)
             elif self.provider == "minimax":
@@ -108,7 +111,7 @@ class Brain:
             max_tokens=4096,
             system=system_msg,
             messages=contents,
-            temperature=temperature
+            temperature=temperature,
         )
         # Handle multiple content blocks (e.g. ThinkingBlock + TextBlock)
         text = ""
@@ -150,9 +153,8 @@ class Brain:
                 contents.append({"role": "model", "parts": [{"text": m["content"]}]})
         return system_msg, contents
 
-    def _stream_handler(self, model, messages, temperature):
-        """Unified streaming handler for Gemini, Anthropic, and OpenAI."""
-        full_response = ""
+    def _stream_generator(self, model, messages, temperature):
+        """Unified streaming generator for Gemini, Anthropic, and OpenAI."""
         if self.provider == "gemini":
             system_msg, contents = self._prep_gemini(messages)
             config = {"system_instruction": system_msg} if system_msg else {}
@@ -160,8 +162,7 @@ class Brain:
                 model=model, contents=contents, config=config
             ):
                 if chunk.text:
-                    console.print(chunk.text, end="", highlight=False)
-                    full_response += chunk.text
+                    yield chunk.text
         elif self.provider == "minimax":
             system_msg, contents = self._prep_anthropic(messages)
             with self.client.messages.stream(
@@ -169,22 +170,17 @@ class Brain:
                 max_tokens=4096,
                 system=system_msg,
                 messages=contents,
-                temperature=temperature
+                temperature=temperature,
             ) as stream:
                 for text in stream.text_stream:
-                    console.print(text, end="", highlight=False)
-                    full_response += text
+                    yield text
         else:
             response = self.client.chat.completions.create(
                 model=model, messages=messages, temperature=temperature, stream=True
             )
             for chunk in response:
                 if chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    console.print(content, end="", highlight=False)
-                    full_response += content
-        console.print()
-        return full_response
+                    yield chunk.choices[0].delta.content
 
 
 class LLMGrader:
@@ -208,7 +204,11 @@ Return JSON: {{"score": 0.0-1.0, "passed": bool, "feedback": "reasoning"}}"""
             clean = re.sub(r"```json\s*|\s*```", "", response.strip())
             return json.loads(clean)
         except:
-            return {"score": 0.0, "passed": False, "feedback": f"Failed to parse grader response: {response}"}
+            return {
+                "score": 0.0,
+                "passed": False,
+                "feedback": f"Failed to parse grader response: {response}",
+            }
 
 
 # ============================================================================
@@ -501,14 +501,14 @@ def retrain_prompt(prompt_manager, brain, task_input, graders, max_retries=3):
     console.rule("[bold blue]Retraining Optimization Loop")
 
     for i in range(max_retries):
-        with console.status(f"[bold green]Iteration {i+1}: Generating response..."):
+        with console.status(f"[bold green]Iteration {i + 1}: Generating response..."):
             messages = [
                 {"role": "system", "content": prompt_manager.current},
                 {"role": "user", "content": task_input},
             ]
             output = brain.chat(messages)
-        
-        console.print(Panel(output, title=f"Iteration {i+1} Output", border_style="dim"))
+
+        console.print(Panel(output, title=f"Iteration {i + 1} Output", border_style="dim"))
 
         with console.status("[bold yellow]Grading output..."):
             results = [g.grade(task_input, output) for g in graders]
@@ -516,7 +516,9 @@ def retrain_prompt(prompt_manager, brain, task_input, graders, max_retries=3):
             scores = [r["score"] for r in results]
             avg_score = sum(scores) / len(scores) if scores else 0.0
 
-        console.print(f"[bold]Grades:[/bold] Passed: {all_passed}, Avg Score: [cyan]{avg_score:.2f}[/cyan]")
+        console.print(
+            f"[bold]Grades:[/bold] Passed: {all_passed}, Avg Score: [cyan]{avg_score:.2f}[/cyan]"
+        )
         for r in results:
             status_char = "[green]✔[/green]" if r["passed"] else "[red]✘[/red]"
             console.print(f"  {status_char} {r.get('feedback', 'No feedback')}")
@@ -527,7 +529,7 @@ def retrain_prompt(prompt_manager, brain, task_input, graders, max_retries=3):
 
         # Failed — collect feedback for metaprompt
         feedback_text = "\n".join([f"- {r.get('feedback')}" for r in results if not r["passed"]])
-        
+
         with console.status("[bold magenta]Consulting Metaprompt Architect..."):
             meta_messages = [
                 {
@@ -543,8 +545,10 @@ def retrain_prompt(prompt_manager, brain, task_input, graders, max_retries=3):
             ]
             new_prompt = brain.chat(meta_messages)
             prompt_manager.update(new_prompt)
-        
-        console.print(f"[bold cyan]Prompt updated to version {len(prompt_manager.history)}[/bold cyan]")
+
+        console.print(
+            f"[bold cyan]Prompt updated to version {len(prompt_manager.history)}[/bold cyan]"
+        )
 
     console.print("[bold red]Fail:[/bold red] Max retries hit without passing all graders.")
     return False
@@ -571,12 +575,16 @@ def evolve(history, existing_skills):
             ]
         )
 
-        history_text = "\n".join([f"{m['role'].upper()}: {m['content'][:500]}" for m in history[-10:]])
+        history_text = "\n".join(
+            [f"{m['role'].upper()}: {m['content'][:500]}" for m in history[-10:]]
+        )
 
         messages = [
             {
                 "role": "system",
-                "content": ARCHITECT_PROMPT.format(existing_skills=skills_json, history=history_text),
+                "content": ARCHITECT_PROMPT.format(
+                    existing_skills=skills_json, history=history_text
+                ),
             },
             {
                 "role": "user",
@@ -612,12 +620,18 @@ def evolve(history, existing_skills):
         console.print(f"[bold red]Error:[/bold red] Skill JSON missing keys: {missing}")
         console.print(f"[dim]Response keys: {list(skill_data.keys())}[/dim]")
         if "no_skill_needed" not in skill_data:
-             console.print(Panel(json.dumps(skill_data, indent=2), title="Architect Response Debug", border_style="red"))
+            console.print(
+                Panel(
+                    json.dumps(skill_data, indent=2),
+                    title="Architect Response Debug",
+                    border_style="red",
+                )
+            )
         return None
 
     triggers = skill_data.get("triggers") or skill_data.get("trigger_phrases") or []
     name = re.sub(r"[^a-z0-9_]", "_", skill_data["name"].lower().strip())
-    
+
     skill_path = SKILLS_DIR / name
     skill_path.mkdir(exist_ok=True)
 
@@ -630,13 +644,16 @@ def evolve(history, existing_skills):
         return None
 
     with open(skill_path / "skill.yaml", "w") as f:
-        yaml.dump({
-            "name": name,
-            "description": skill_data.get("description", ""),
-            "triggers": triggers,
-            "version": "1.0",
-            "created": datetime.now().isoformat(),
-        }, f)
+        yaml.dump(
+            {
+                "name": name,
+                "description": skill_data.get("description", ""),
+                "triggers": triggers,
+                "version": "1.0",
+                "created": datetime.now().isoformat(),
+            },
+            f,
+        )
 
     with open(skill_path / "tool.py", "w") as f:
         f.write(code)
@@ -670,37 +687,59 @@ def wipe_skills():
 
 def parse_tool_call(response):
     """
-    Ultra-resilient tool call parser. 
-    Matches:
-    - CALL_SKILL: name WITH_ARGS: {json}
-    - <CALL_SKILL: name WITH_ARGS> {json} </CALL_SKILL>
-    - <minimax:tool_call><invoke name="name"><parameter name="x">y</parameter>...
+    Omni-resilient tool call parser.
+    Handles: Standard, XML, Shorthand, Square Brackets, and Key-Value pairs.
     """
-    # Try Regex for any format containing a skill name and a JSON block
-    # Matches "CALL_SKILL: name" or "<CALL_SKILL: name"
-    name_match = re.search(r"(?:CALL_SKILL:\s*|<CALL_SKILL:\s*)([a-zA-Z0-9_-]+)", response)
+    # 1. Look for Skill Name
+    # Matches: CALL_SKILL: name, <invoke name="name">, [TOOL_CALL] name, etc.
+    name_patterns = [
+        r"(?:CALL_SKILL:\s*|<CALL_SKILL:\s*|\[TOOL_CALL\]\s*|name=[\"'])([a-zA-Z0-9_-]+)",
+        r"<invoke\s+name=[\"']([a-zA-Z0-9_-]+)[\"']",
+        r"invoke\s+([a-zA-Z0-9_-]+)",
+    ]
+
+    skill_name = None
+    for p in name_patterns:
+        m = re.search(p, response, re.IGNORECASE)
+        if m:
+            skill_name = m.group(1).strip()
+            break
+
+    if not skill_name:
+        # Fallback: if we see 'action' and 'command' but no name, it's 'shell'
+        if ("action" in response or "command" in response) and (
+            "run_command" in response or "write_file" in response
+        ):
+            skill_name = "shell"
+        else:
+            return None, None
+
+    # 2. Extract Arguments (JSON or Params)
+    # Try JSON first
     json_match = re.search(r"(\{.*\})", response, re.DOTALL)
-    
-    if name_match and json_match:
+    if json_match:
         try:
-            return name_match.group(1).strip(), json.loads(json_match.group(1))
+            return skill_name, json.loads(json_match.group(1))
         except:
             pass
 
-    # Fallback to Minimax XML specific format
-    if "<minimax:tool_call>" in response or "<invoke" in response:
-        try:
-            name_match = re.search(r'name=["\'](.*?)["\']', response)
-            skill_name = name_match.group(1) if name_match else None
-            params = {}
-            param_matches = re.finditer(r'<parameter name=["\'](.*?)["\']>(.*?)</parameter>', response, re.DOTALL)
-            for m in param_matches:
-                params[m.group(1)] = m.group(2).strip()
-            if skill_name and params:
-                return skill_name, params
-        except:
-            pass
-            
+    # Try XML/Shorthand parameters
+    params = {}
+    param_matches = re.finditer(
+        r'(?:<parameter name=["\']|<)([a-zA-Z0-9_-]+)["\']?>(.*?)</\1>', response, re.DOTALL
+    )
+    for m in param_matches:
+        params[m.group(1)] = m.group(2).strip()
+
+    # Try Key-Value pairs (e.g. action => "val", command: "val")
+    if not params:
+        kv_matches = re.finditer(r'([a-zA-Z0-9_-]+)\s*[:=][=>]?\s*["\'](.*?)["\']', response)
+        for m in kv_matches:
+            params[m.group(1)] = m.group(2).strip()
+
+    if params:
+        return skill_name, params
+
     return None, None
 
 
@@ -710,13 +749,16 @@ def parse_tool_call(response):
 
 
 def main():
-    console.print(Panel.fit(
-        f"[bold blue]EvolveBot[/bold blue] - Self-Evolving Agent\n"
-        f"Executor:  [cyan]{DEFAULT_EXECUTOR}[/cyan]\n"
-        f"Architect: [cyan]{DEFAULT_ARCHITECT}[/cyan]\n"
-        f"Exec mode: [green]{EXEC_MODE}[/green]",
-        title="Welcome", border_style="blue"
-    ))
+    console.print(
+        Panel.fit(
+            f"[bold blue]EvolveBot[/bold blue] - Self-Evolving Agent\n"
+            f"Executor:  [cyan]{DEFAULT_EXECUTOR}[/cyan]\n"
+            f"Architect: [cyan]{DEFAULT_ARCHITECT}[/cyan]\n"
+            f"Exec mode: [green]{EXEC_MODE}[/green]",
+            title="Welcome",
+            border_style="blue",
+        )
+    )
 
     provider = os.getenv("EVOLVE_PROVIDER")
     brain = Brain(provider=provider, model=DEFAULT_EXECUTOR)
@@ -725,7 +767,11 @@ def main():
     skills = load_skills()
     console.print(f"[dim]Loaded {len(skills)} skill(s)[/dim]")
 
-    goal = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else console.input("\n[bold green]Goal?[/bold green] ").strip()
+    goal = (
+        " ".join(sys.argv[1:])
+        if len(sys.argv) > 1
+        else console.input("\n[bold green]Goal?[/bold green] ").strip()
+    )
 
     messages = [
         {"role": "system", "content": pm.current.format(skills_summary=get_skill_summary(skills))},
@@ -733,60 +779,234 @@ def main():
     ]
 
     console.rule(f"[bold]Target: {goal}")
-    console.print("[dim]Commands: exit | retrain | force-evolve | wipe-sandbox | wipe-skills[/dim]\n")
+    console.print(
+        "[dim]Commands: exit | retrain | force-evolve | wipe-sandbox | wipe-skills[/dim]\n"
+    )
 
     while True:
         skills = load_skills()
         messages[0]["content"] = pm.current.format(skills_summary=get_skill_summary(skills))
 
-        console.print("[bold blue]Bot:[/bold blue] ", end="")
-        response = brain.chat(messages, stream=True)
-        messages.append({"role": "assistant", "content": response})
+        console.print("\n[bold blue]Bot Thinking...[/bold blue]")
+
+        full_response = ""
+        # 1. Live Streaming with Markdown
+        with Live(Markdown(""), refresh_per_second=10, console=console) as live:
+            for chunk in brain.chat(messages, stream=True):
+                full_response += chunk
+                live.update(Markdown(full_response))
+
+        messages.append({"role": "assistant", "content": full_response})
+
+        # Check for success marker immediately
+        if "[[SUCCESS]]" in full_response:
+            console.print("\n[bold green]✨ Goal Reached![/bold green]")
+            evolve(messages, skills)
+            break
 
         # Handle skill invocation
-        skill_name, args = parse_tool_call(response)
+        skill_name, args = parse_tool_call(full_response)
         if skill_name:
             try:
-                with console.status(f"[bold cyan]Running {skill_name}..."):
+                # Cleaner tool execution UI
+                with console.status(f"[bold cyan]⚡ Executing {skill_name}..."):
                     result = run_tool(skill_name, args)
-                
-                console.print(Panel(json.dumps(result, indent=2), title=f"Result: {skill_name}", border_style="cyan"))
+
+                # Show results in a compact panel
+                res_str = json.dumps(result, indent=2)
+                if len(res_str) > 1000:
+                    res_str = res_str[:1000] + "... (truncated)"
+                console.print(
+                    Panel(
+                        res_str,
+                        title=f"Result: {skill_name}",
+                        border_style="cyan",
+                        subtitle="Auto-continuing...",
+                    )
+                )
+
                 messages.append({"role": "user", "content": f"Tool result: {json.dumps(result)}"})
+                # AUTOMATIC CONTINUITY: Go straight back to the LLM
                 continue
             except Exception as e:
                 console.print(f"[bold red]Skill Error:[/bold red] {e}")
                 messages.append({"role": "user", "content": f"Tool error: {e}"})
                 continue
 
-        if "[[SUCCESS]]" in response:
-            console.print("\n[bold green]Goal Reached![/bold green]")
-            evolve(messages, skills)
-            break
-
-        user_input = console.input("\n[bold green]You:[/bold green] ").strip()
+        # If no tool call and no success, finally ask the user
+        user_input = console.input("\n[bold green]➜[/bold green] ").strip()
         low_input = user_input.lower()
-        
-        if low_input in ["exit", "quit"]: break
+
+        if low_input in ["exit", "quit"]:
+            break
         if low_input == "retrain":
             rubric = console.input("[bold magenta]Rubric:[/bold magenta] ").strip()
             target_words = 100
             if "words" in rubric:
                 match = re.search(r"(\d+)\s*words", rubric)
-                if match: target_words = int(match.group(1))
-            
+                if match:
+                    target_words = int(match.group(1))
+
             graders = [
                 LengthGrader(target_len=target_words, tolerance=target_words // 4),
                 LLMGrader(brain, rubric),
             ]
             retrain_prompt(pm, brain, goal, graders)
             continue
-        
-        if low_input == "force-evolve": evolve(messages, skills); continue
-        if low_input == "wipe-sandbox": wipe_sandbox(); continue
-        if low_input == "wipe-skills": wipe_skills(); continue
+
+        if low_input == "force-evolve":
+            evolve(messages, skills)
+            continue
+        if low_input == "wipe-sandbox":
+            wipe_sandbox()
+            continue
+        if low_input == "wipe-skills":
+            wipe_skills()
+            continue
+
+        messages.append({"role": "user", "content": user_input})
+
+        if low_input == "force-evolve":
+            evolve(messages, skills)
+            continue
+        if low_input == "wipe-sandbox":
+            wipe_sandbox()
+            continue
+        if low_input == "wipe-skills":
+            wipe_skills()
+            continue
+
+        messages.append({"role": "user", "content": user_input})
+
+        if low_input == "force-evolve":
+            evolve(messages, skills)
+            continue
+        if low_input == "wipe-sandbox":
+            wipe_sandbox()
+            continue
+        if low_input == "wipe-skills":
+            wipe_skills()
+            continue
 
         messages.append({"role": "user", "content": user_input})
 
 
+def main_dashboard():
+    """Dashboard-based TUI version of main."""
+    from rich.live import Live
+
+    USE_DASHBOARD = os.getenv("DASHBOARD", "false").lower() == "true"
+
+    if not USE_DASHBOARD:
+        main()
+        return
+
+    provider = os.getenv("EVOLVE_PROVIDER")
+    brain = Brain(provider=provider, model=DEFAULT_EXECUTOR)
+    pm = PromptManager(EXECUTOR_PROMPT)
+
+    skills = load_skills()
+    goal = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else input("Goal? ").strip()
+
+    dashboard = create_dashboard(provider=provider or "auto", model=DEFAULT_EXECUTOR, goal=goal)
+    dashboard.update_skills(skills)
+
+    messages = [
+        {"role": "system", "content": pm.current.format(skills_summary=get_skill_summary(skills))},
+        {"role": "user", "content": f"GOAL: {goal}"},
+    ]
+
+    dashboard.add_message("system", pm.current.format(skills_summary=get_skill_summary(skills)))
+    dashboard.add_message("user", f"GOAL: {goal}")
+
+    with Live(dashboard.render(), console=dashboard.console, refresh_per_second=4) as live:
+        dashboard.live = live
+        live.update(dashboard.render())
+
+        dashboard.console.print(
+            Panel.fit(
+                f"[bold blue]EvolveBot[/bold blue] - Dashboard Mode\n"
+                f"Goal: [cyan]{goal}[/cyan]\n\n"
+                f"[dim]Commands: exit, retrain, force-evolve, wipe-sandbox, wipe-skills[/dim]",
+                title="Welcome",
+                border_style="blue",
+            )
+        )
+
+        while True:
+            skills = load_skills()
+            messages[0]["content"] = pm.current.format(skills_summary=get_skill_summary(skills))
+            dashboard.update_skills(skills)
+            dashboard.refresh_sandbox()
+            live.update(dashboard.render())
+
+            full_response = ""
+            for chunk in brain.chat(messages, stream=True):
+                full_response += chunk
+
+            messages.append({"role": "assistant", "content": full_response})
+            dashboard.add_message("assistant", full_response)
+            live.update(dashboard.render())
+
+            if "[[SUCCESS]]" in full_response:
+                dashboard.console.print("\n[bold green]Goal Reached![/bold green]")
+                evolve(messages, skills)
+                break
+
+            skill_name, args = parse_tool_call(full_response)
+            if skill_name:
+                try:
+                    with dashboard.console.status(f"[bold cyan]Executing {skill_name}..."):
+                        result = run_tool(skill_name, args)
+
+                    res_str = json.dumps(result, indent=2)
+                    if len(res_str) > 500:
+                        res_str = res_str[:500] + "..."
+                    dashboard.add_tool_log(skill_name, args, res_str, success=True)
+
+                    dashboard.add_message("assistant", full_response, tool_result=res_str)
+                    messages.append(
+                        {"role": "user", "content": f"Tool result: {json.dumps(result)}"}
+                    )
+                    dashboard.increment_turn()
+                    live.update(dashboard.render())
+                    continue
+                except Exception as e:
+                    dashboard.add_tool_log(skill_name, args, str(e), success=False)
+                    messages.append({"role": "user", "content": f"Tool error: {e}"})
+                    live.update(dashboard.render())
+                    continue
+
+            user_input = dashboard.input("\n[bold green]>[/bold green] ").strip()
+            low_input = user_input.lower()
+
+            if low_input in ["exit", "quit"]:
+                break
+            if low_input == "retrain":
+                rubric = dashboard.input("[bold magenta]Rubric:[/bold magenta] ").strip()
+                graders = [
+                    LengthGrader(target_len=100, tolerance=25),
+                    LLMGrader(brain, rubric),
+                ]
+                retrain_prompt(pm, brain, goal, graders)
+                continue
+            if low_input == "force-evolve":
+                evolve(messages, skills)
+                continue
+            if low_input == "wipe-sandbox":
+                wipe_sandbox()
+                continue
+            if low_input == "wipe-skills":
+                wipe_skills()
+                continue
+
+            messages.append({"role": "user", "content": user_input})
+            dashboard.add_message("user", user_input)
+            live.update(dashboard.render())
+
+
 if __name__ == "__main__":
-    main()
+    if os.getenv("DASHBOARD", "false").lower() == "true":
+        main_dashboard()
+    else:
+        main()

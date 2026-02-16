@@ -4,3 +4,4 @@ python-dotenv
 rich
 pyyaml
 anthropic
+textual
